@@ -1400,10 +1400,14 @@ interface DispatcherResult {
 export class Dispatcher {
   _subsequentPayloads: Array<Promise<IteratorResult<DispatcherResult, void>>>;
   _initialResult?: ExecutionResult;
+  _iterators: Array<AsyncIterator<unknown>>;
+  _isDone: boolean;
   _hasReturnedInitialResult: boolean;
 
   constructor() {
     this._subsequentPayloads = [];
+    this._iterators = [];
+    this._isDone = false;
     this._hasReturnedInitialResult = false;
   }
 
@@ -1472,6 +1476,8 @@ export class Dispatcher {
     label?: string,
   ): void {
     const subsequentPayloads = this._subsequentPayloads;
+    const iterators = this._iterators;
+    iterators.push(iterator);
     function next(index: number) {
       const fieldPath = addPath(path, index, undefined);
       const patchErrors: Array<GraphQLError> = [];
@@ -1479,6 +1485,7 @@ export class Dispatcher {
         iterator.next().then(
           ({ value: data, done }) => {
             if (done) {
+              iterators.splice(iterators.indexOf(iterator), 1);
               return { value: undefined, done: true };
             }
 
@@ -1549,6 +1556,14 @@ export class Dispatcher {
   }
 
   _race(): Promise<IteratorResult<ExecutionPatchResult, void>> {
+    if (this._isDone) {
+      return Promise.resolve({
+        value: {
+          hasNext: false,
+        },
+        done: false,
+      });
+    }
     return new Promise<{
       promise: Promise<IteratorResult<DispatcherResult, void>>;
     }>((resolve) => {
@@ -1608,6 +1623,20 @@ export class Dispatcher {
     return this._race();
   }
 
+  async _return(): Promise<IteratorResult<AsyncExecutionResult, void>> {
+    await Promise.all(this._iterators.map((iterator) => iterator.return?.()));
+    this._isDone = true;
+    return { value: undefined, done: true };
+  }
+
+  async _throw(
+    error?: unknown,
+  ): Promise<IteratorResult<AsyncExecutionResult, void>> {
+    await Promise.all(this._iterators.map((iterator) => iterator.return?.()));
+    this._isDone = true;
+    return Promise.reject(error);
+  }
+
   get(
     initialResult: ExecutionResult,
   ): AsyncGenerator<AsyncExecutionResult, void, void> {
@@ -1617,13 +1646,8 @@ export class Dispatcher {
         return this;
       },
       next: () => this._next(),
-      // TODO: implement return & throw
-      return: /* istanbul ignore next: will be covered in follow up */ () =>
-        Promise.resolve({ value: undefined, done: true }),
-
-      throw: /* istanbul ignore next: will be covered in follow up */ (
-        error?: unknown,
-      ) => Promise.reject(error),
+      return: () => this._return(),
+      throw: (error?: unknown) => this._throw(error),
     };
   }
 }
